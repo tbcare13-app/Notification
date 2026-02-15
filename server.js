@@ -39,7 +39,7 @@ app.get('/', (req, res) => {
   });
 });
 
-// Endpoint to send broadcast notifications
+// Endpoint to send broadcast notifications - FIXED VERSION
 app.post('/api/send-broadcast', async (req, res) => {
   try {
     const { message, audience, adminId } = req.body;
@@ -62,13 +62,14 @@ app.post('/api/send-broadcast', async (req, res) => {
       status: 'pending'
     });
 
-    // 2. Get FCM tokens based on audience
+    // 2. Get FCM tokens - WITHOUT composite indexes
     let tokens = [];
-    let usersSnapshot;
 
     if (audience === 'all') {
-      // Get all users with FCM tokens
-      usersSnapshot = await db.collection('users')
+      console.log('🔍 Fetching tokens for ALL users');
+      
+      // Get all users with FCM tokens - SINGLE WHERE CLAUSE
+      const usersSnapshot = await db.collection('users')
         .where('fcmToken', '!=', null)
         .get();
       
@@ -98,16 +99,47 @@ app.post('/api/send-broadcast', async (req, res) => {
       });
 
     } else {
-      // Get users with specific role
-      usersSnapshot = await db.collection('users')
-        .where('role', '==', audience)
+      console.log(`🔍 Fetching tokens for ${audience} users`);
+      
+      // Get ALL users with tokens FIRST - SINGLE WHERE CLAUSE
+      const usersSnapshot = await db.collection('users')
         .where('fcmToken', '!=', null)
         .get();
       
+      // THEN filter by role in JavaScript (NO INDEX NEEDED)
       usersSnapshot.forEach(doc => {
-        const token = doc.data().fcmToken;
-        if (token) tokens.push(token);
+        const userData = doc.data();
+        const userRole = userData.role ? userData.role.toLowerCase() : '';
+        const token = userData.fcmToken;
+        
+        // Manual role filtering - this avoids the composite index
+        if (token && userRole === audience.toLowerCase()) {
+          tokens.push(token);
+        }
       });
+      
+      // Also check role-specific collections
+      if (audience.toLowerCase() === 'doctors') {
+        const doctorsSnapshot = await db.collection('doctors')
+          .where('fcmToken', '!=', null)
+          .get();
+        
+        doctorsSnapshot.forEach(doc => {
+          const token = doc.data().fcmToken;
+          if (token) tokens.push(token);
+        });
+      }
+      
+      if (audience.toLowerCase() === 'chws') {
+        const chwSnapshot = await db.collection('chws')
+          .where('fcmToken', '!=', null)
+          .get();
+        
+        chwSnapshot.forEach(doc => {
+          const token = doc.data().fcmToken;
+          if (token) tokens.push(token);
+        });
+      }
     }
 
     console.log(`📱 Found ${tokens.length} devices to notify`);
