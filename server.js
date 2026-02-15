@@ -39,12 +39,13 @@ app.get('/', (req, res) => {
   });
 });
 
-// Endpoint to send broadcast notifications - FIXED VERSION
+// Endpoint to send broadcast notifications - COMPLETELY FIXED VERSION
 app.post('/api/send-broadcast', async (req, res) => {
   try {
     const { message, audience, adminId } = req.body;
     
-    console.log(`📢 Sending broadcast to ${audience}: ${message}`);
+    console.log(`📢 Sending broadcast to "${audience}": "${message}"`);
+    console.log(`📦 Request body:`, req.body);
 
     // Validate input
     if (!message || !audience || !adminId) {
@@ -61,31 +62,42 @@ app.post('/api/send-broadcast', async (req, res) => {
       sentBy: adminId,
       status: 'pending'
     });
+    console.log(`✅ Saved broadcast to Firestore with ID: ${broadcastRef.id}`);
 
-    // 2. Get FCM tokens - WITHOUT composite indexes
+    // 2. Get FCM tokens - WITH DETAILED LOGGING
     let tokens = [];
 
     if (audience === 'all') {
       console.log('🔍 Fetching tokens for ALL users');
       
-      // Get all users with FCM tokens - SINGLE WHERE CLAUSE
+      // Get all users with FCM tokens
       const usersSnapshot = await db.collection('users')
         .where('fcmToken', '!=', null)
         .get();
       
+      console.log(`📊 Found ${usersSnapshot.size} users with tokens`);
       usersSnapshot.forEach(doc => {
-        const token = doc.data().fcmToken;
-        if (token) tokens.push(token);
+        const data = doc.data();
+        const token = data.fcmToken;
+        const role = data.role || 'unknown';
+        if (token) {
+          tokens.push(token);
+          console.log(`   👤 User (${role}): ${token.substring(0, 20)}...`);
+        }
       });
 
-      // Also check doctors collection
+      // Check doctors collection
       const doctorsSnapshot = await db.collection('doctors')
         .where('fcmToken', '!=', null)
         .get();
       
+      console.log(`📊 Found ${doctorsSnapshot.size} doctors with tokens`);
       doctorsSnapshot.forEach(doc => {
         const token = doc.data().fcmToken;
-        if (token) tokens.push(token);
+        if (token) {
+          tokens.push(token);
+          console.log(`   👨‍⚕️ Doctor: ${token.substring(0, 20)}...`);
+        }
       });
 
       // Check CHWs collection
@@ -93,62 +105,96 @@ app.post('/api/send-broadcast', async (req, res) => {
         .where('fcmToken', '!=', null)
         .get();
       
+      console.log(`📊 Found ${chwSnapshot.size} CHWs with tokens`);
       chwSnapshot.forEach(doc => {
         const token = doc.data().fcmToken;
-        if (token) tokens.push(token);
+        if (token) {
+          tokens.push(token);
+          console.log(`   👥 CHW: ${token.substring(0, 20)}...`);
+        }
       });
 
     } else {
-      console.log(`🔍 Fetching tokens for ${audience} users`);
+      const targetRole = audience.toLowerCase();
+      console.log(`🔍 Fetching tokens for "${targetRole}" users (case-insensitive)`);
       
-      // Get ALL users with tokens FIRST - SINGLE WHERE CLAUSE
-      const usersSnapshot = await db.collection('users')
-        .where('fcmToken', '!=', null)
-        .get();
-      
-      // THEN filter by role in JavaScript (NO INDEX NEEDED)
-      usersSnapshot.forEach(doc => {
-        const userData = doc.data();
-        const userRole = userData.role ? userData.role.toLowerCase() : '';
-        const token = userData.fcmToken;
-        
-        // Manual role filtering - this avoids the composite index
-        if (token && userRole === audience.toLowerCase()) {
-          tokens.push(token);
-        }
-      });
-      
-      // Also check role-specific collections
-      if (audience.toLowerCase() === 'doctors') {
-        const doctorsSnapshot = await db.collection('doctors')
-          .where('fcmToken', '!=', null)
-          .get();
-        
-        doctorsSnapshot.forEach(doc => {
-          const token = doc.data().fcmToken;
-          if (token) tokens.push(token);
-        });
-      }
-      
-      if (audience.toLowerCase() === 'chws') {
+      // FIRST: Check role-specific collections directly (most reliable)
+      if (targetRole === 'chws' || targetRole === 'chw') {
+        console.log('   📁 Checking chws collection directly...');
         const chwSnapshot = await db.collection('chws')
           .where('fcmToken', '!=', null)
           .get();
         
+        console.log(`   Found ${chwSnapshot.size} CHWs with tokens in chws collection`);
         chwSnapshot.forEach(doc => {
           const token = doc.data().fcmToken;
-          if (token) tokens.push(token);
+          if (token) {
+            tokens.push(token);
+            console.log(`   ✓ CHW token: ${token.substring(0, 20)}...`);
+          }
         });
       }
+      
+      if (targetRole === 'doctors' || targetRole === 'doctor') {
+        console.log('   📁 Checking doctors collection directly...');
+        const doctorsSnapshot = await db.collection('doctors')
+          .where('fcmToken', '!=', null)
+          .get();
+        
+        console.log(`   Found ${doctorsSnapshot.size} doctors with tokens in doctors collection`);
+        doctorsSnapshot.forEach(doc => {
+          const token = doc.data().fcmToken;
+          if (token) {
+            tokens.push(token);
+            console.log(`   ✓ Doctor token: ${token.substring(0, 20)}...`);
+          }
+        });
+      }
+      
+      // SECOND: Check users collection with flexible role matching
+      console.log('   📁 Checking users collection with role filtering...');
+      const usersSnapshot = await db.collection('users')
+        .where('fcmToken', '!=', null)
+        .get();
+      
+      console.log(`   Found ${usersSnapshot.size} users with tokens to check`);
+      
+      let matched = 0;
+      usersSnapshot.forEach(doc => {
+        const userData = doc.data();
+        const userRole = userData.role ? userData.role.toString() : '';
+        const token = userData.fcmToken;
+        const userId = doc.id;
+        
+        // Case-insensitive matching with multiple variations
+        const isMatch = 
+          userRole.toLowerCase() === targetRole ||
+          userRole.toLowerCase() === targetRole.slice(0, -1) || // remove 's' for plural
+          (targetRole === 'chws' && userRole.toLowerCase() === 'chw') ||
+          (targetRole === 'doctors' && userRole.toLowerCase() === 'doctor');
+        
+        if (token && isMatch) {
+          tokens.push(token);
+          matched++;
+          console.log(`   ✓ User ${userId} (role: ${userRole}) token: ${token.substring(0, 20)}...`);
+        } else if (token) {
+          console.log(`   ✗ User ${userId} role "${userRole}" doesn't match "${targetRole}"`);
+        }
+      });
+      console.log(`   Matched ${matched} users from users collection`);
     }
 
-    console.log(`📱 Found ${tokens.length} devices to notify`);
+    // Remove duplicate tokens (same device might be in multiple collections)
+    const uniqueTokens = [...new Set(tokens)];
+    console.log(`📱 Total unique devices found: ${uniqueTokens.length} (from ${tokens.length} total entries)`);
 
     // 3. Send notifications
     let successCount = 0;
     let failureCount = 0;
 
-    if (tokens.length > 0) {
+    if (uniqueTokens.length > 0) {
+      console.log(`📨 Sending notifications to ${uniqueTokens.length} devices...`);
+      
       // Send to multiple tokens at once (max 500 per batch)
       const messagePayload = {
         notification: {
@@ -160,7 +206,7 @@ app.post('/api/send-broadcast', async (req, res) => {
           message: message,
           sentAt: Date.now().toString(),
         },
-        tokens: tokens,
+        tokens: uniqueTokens,
       };
 
       try {
@@ -168,31 +214,51 @@ app.post('/api/send-broadcast', async (req, res) => {
         successCount = response.successCount;
         failureCount = response.failureCount;
         
-        console.log(`✅ Success: ${successCount}, Failed: ${failureCount}`);
+        console.log(`✅ Successfully sent: ${successCount}`);
+        console.log(`❌ Failed: ${failureCount}`);
+        
+        // Log failed tokens if any
+        if (failureCount > 0) {
+          response.responses.forEach((resp, idx) => {
+            if (!resp.success) {
+              console.log(`   ❌ Token ${idx}: ${resp.error}`);
+            }
+          });
+        }
       } catch (fcmError) {
-        console.error('FCM Error:', fcmError);
+        console.error('❌ FCM Error:', fcmError);
       }
+    } else {
+      console.log('⚠️ No devices found to notify');
     }
 
     // 4. Update broadcast status
     await broadcastRef.update({
       status: 'sent',
-      recipientCount: tokens.length,
+      recipientCount: uniqueTokens.length,
       successCount,
       failureCount
     });
 
     res.json({ 
       success: true, 
-      count: tokens.length,
+      count: uniqueTokens.length,
       successCount,
       failureCount,
-      broadcastId: broadcastRef.id
+      broadcastId: broadcastRef.id,
+      details: {
+        tokensFound: tokens.length,
+        uniqueTokens: uniqueTokens.length
+      }
     });
 
   } catch (error) {
     console.error('❌ Broadcast error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ 
+      error: error.message,
+      stack: error.stack 
+    });
   }
 });
 
@@ -211,11 +277,11 @@ app.get('/api/broadcast-history', async (req, res) => {
       const data = doc.data();
       history.push({
         id: doc.id,
-        message: data.message,
-        audience: data.audience,
-        sentAt: data.sentAt?.toDate().toISOString(),
-        sentBy: data.sentBy,
-        status: data.status,
+        message: data.message || '',
+        audience: data.audience || 'all',
+        sentAt: data.sentAt ? data.sentAt.toDate().toISOString() : new Date().toISOString(),
+        sentBy: data.sentBy || '',
+        status: data.status || 'unknown',
         recipientCount: data.recipientCount || 0,
         successCount: data.successCount || 0,
         failureCount: data.failureCount || 0
@@ -224,7 +290,7 @@ app.get('/api/broadcast-history', async (req, res) => {
 
     res.json(history);
   } catch (error) {
-    console.error('Error fetching history:', error);
+    console.error('❌ Error fetching history:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -250,7 +316,55 @@ app.get('/api/stats', async (req, res) => {
       today: todayCount
     });
   } catch (error) {
-    console.error('Error fetching stats:', error);
+    console.error('❌ Error fetching stats:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Test endpoint to check Firestore structure
+app.get('/api/debug/collections', async (req, res) => {
+  try {
+    const result = {
+      users: { total: 0, withTokens: 0, roles: {} },
+      chws: { total: 0, withTokens: 0 },
+      doctors: { total: 0, withTokens: 0 }
+    };
+    
+    // Check users collection
+    const usersSnapshot = await db.collection('users').get();
+    result.users.total = usersSnapshot.size;
+    
+    usersSnapshot.forEach(doc => {
+      const data = doc.data();
+      const role = data.role || 'unknown';
+      const hasToken = !!data.fcmToken;
+      
+      if (!result.users.roles[role]) {
+        result.users.roles[role] = { total: 0, withTokens: 0 };
+      }
+      result.users.roles[role].total++;
+      if (hasToken) {
+        result.users.withTokens++;
+        result.users.roles[role].withTokens++;
+      }
+    });
+    
+    // Check chws collection
+    const chwsSnapshot = await db.collection('chws').get();
+    result.chws.total = chwsSnapshot.size;
+    chwsSnapshot.forEach(doc => {
+      if (doc.data().fcmToken) result.chws.withTokens++;
+    });
+    
+    // Check doctors collection
+    const doctorsSnapshot = await db.collection('doctors').get();
+    result.doctors.total = doctorsSnapshot.size;
+    doctorsSnapshot.forEach(doc => {
+      if (doc.data().fcmToken) result.doctors.withTokens++;
+    });
+    
+    res.json(result);
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -263,4 +377,5 @@ app.listen(PORT, () => {
   console.log(`   - POST /api/send-broadcast`);
   console.log(`   - GET  /api/broadcast-history`);
   console.log(`   - GET  /api/stats`);
+  console.log(`   - GET  /api/debug/collections`);
 });
